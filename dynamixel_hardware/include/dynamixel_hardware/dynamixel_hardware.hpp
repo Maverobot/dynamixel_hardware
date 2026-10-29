@@ -109,7 +109,6 @@ private:
   ControlMode control_mode_{ControlMode::Position};
   bool mode_changed_{false};
   bool use_dummy_{false};
-  double read_error_timeout_ms_{250.0};
   int64_t read_error_timeout_ns_{250000000};
   rclcpp::Duration read_failure_elapsed_{0, 0};
   bool read_failed_{false};

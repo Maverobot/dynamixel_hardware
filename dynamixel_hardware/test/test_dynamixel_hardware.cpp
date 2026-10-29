@@ -379,7 +379,8 @@ protected:
   void TearDown() override {EXPECT_TRUE(bus_.healthy());}
 
   CallbackReturn init(
-    const std::string & parameters = "", const std::string & joint_parameters = "")
+    const std::string & parameters = "", const std::string & joint_parameters = "",
+    const char * read_error_timeout_ms = nullptr)
   {
     std::string urdf =
       "<robot name='test'><link name='base'/><link name='link1'/><link name='link2'/>"
@@ -398,6 +399,10 @@ protected:
     urdf += "</ros2_control></robot>";
     hardware_interface::HardwareComponentParams params;
     params.hardware_info = hardware_interface::parse_control_resources_from_urdf(urdf).at(0);
+    if (read_error_timeout_ms != nullptr) {
+      // XML parsing trims whitespace; supply the exact value to the public init API.
+      params.hardware_info.hardware_parameters["read_error_timeout_ms"] = read_error_timeout_ms;
+    }
     params.clock = std::make_shared<rclcpp::Clock>();
     return hardware_.init(params);
   }
@@ -514,13 +519,15 @@ TEST_F(DynamixelHardwareTest, TimeoutAtExactly1001Milliseconds)
   EXPECT_EQ(read_ms(1001), return_type::ERROR);
 }
 
-TEST_F(DynamixelHardwareTest, FractionalNanosecondTimeoutRoundsUp)
+TEST_F(DynamixelHardwareTest, LargestIntegerMillisecondTimeoutIsExact)
 {
-  ASSERT_EQ(init("<param name='read_error_timeout_ms'>0.0000015</param>"), CallbackReturn::SUCCESS);
+  ASSERT_EQ(
+    init("<param name='read_error_timeout_ms'>9223372036854</param>"), CallbackReturn::SUCCESS);
   bus_.drop_reads(2);
-  const auto period = rclcpp::Duration::from_nanoseconds(1);
-  EXPECT_EQ(hardware_.read(rclcpp::Time{}, period), return_type::OK);
-  EXPECT_EQ(hardware_.read(rclcpp::Time{}, period), return_type::ERROR);
+  const auto just_before = rclcpp::Duration::from_nanoseconds(9223372036854000000LL - 1);
+  EXPECT_EQ(hardware_.read(rclcpp::Time{}, just_before), return_type::OK);
+  EXPECT_EQ(
+    hardware_.read(rclcpp::Time{}, rclcpp::Duration::from_nanoseconds(1)), return_type::ERROR);
 }
 
 class InvalidReadTimeoutTest : public DynamixelHardwareTest,
@@ -530,9 +537,7 @@ class InvalidReadTimeoutTest : public DynamixelHardwareTest,
 
 TEST_P(InvalidReadTimeoutTest, InvalidTimeoutRejectedBeforeServoPackets)
 {
-  EXPECT_EQ(
-    init("<param name='read_error_timeout_ms'>" + std::string(GetParam()) + "</param>"),
-    CallbackReturn::ERROR);
+  EXPECT_EQ(init("", "", GetParam()), CallbackReturn::ERROR);
   EXPECT_TRUE(bus_.writes().empty());
   EXPECT_EQ(bus_.read_count(), 0);
   EXPECT_TRUE(transport_.packets().empty());
@@ -540,7 +545,9 @@ TEST_P(InvalidReadTimeoutTest, InvalidTimeoutRejectedBeforeServoPackets)
 
 INSTANTIATE_TEST_SUITE_P(
   InvalidValues, InvalidReadTimeoutTest,
-  ::testing::Values("0", "-1", "nan", "inf", "no", "250ms", "", "1e999", "1e20"));
+  ::testing::Values(
+    "0", "-5", "+250", "250.3", "0.1", "1e3", "abc", "nan", "inf", "250ms", "", " 250", "250 ",
+    "9223372036855", "9223372036854.775808", "9223372036854775808"));
 
 TEST_F(DynamixelHardwareTest, ActivationWithoutValidReadWritesNoGoal)
 {

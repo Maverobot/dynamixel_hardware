@@ -30,10 +30,13 @@ The `use_dummy` parameter is required if you don't have a real OpenManipulator-X
 
 Note that `joint_ids` parameters must be splited by `,`.
 
-For real hardware, `read_error_timeout_ms` is an optional positive, finite number
-(default `250`). It is rounded up to whole nanoseconds; values exceeding the
-64-bit nanosecond range are rejected. A failed sync read preserves all last valid
-joint states. The
+For real hardware, `read_error_timeout_ms` is an optional positive integer number
+of milliseconds (default `250`). The parsed parameter must contain only decimal
+digits: no signs, fractions, exponents or whitespace. The maximum is
+`9223372036854` ms so conversion to signed 64-bit nanoseconds is exact and cannot
+overflow. Invalid values fail
+initialization before any servo packet is sent.
+A failed sync read preserves all last valid joint states. The
 consecutive failed cycles' control-loop periods accumulate toward this timeout;
 at the timeout the hardware returns an error. A valid read resets the timer.
 Activation requires a valid read within three attempts before writing any goal.

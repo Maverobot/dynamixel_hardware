@@ -16,6 +16,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cinttypes>
 #include <cmath>
 #include <cstring>
 #include <limits>
@@ -111,25 +112,25 @@ CallbackReturn DynamixelHardware::on_init(
   // Workbench 2.2.4 dereferences its port in the destructor even if init was never called.
   const auto timeout = info_.hardware_parameters.find("read_error_timeout_ms");
   if (timeout != info_.hardware_parameters.end()) {
+    constexpr int64_t max_timeout_ms = std::numeric_limits<int64_t>::max() / 1000000;
     try {
-      size_t parsed = 0;
-      read_error_timeout_ms_ = std::stod(timeout->second, &parsed);
-      if (parsed != timeout->second.size() || !std::isfinite(read_error_timeout_ms_) ||
-        read_error_timeout_ms_ <= 0.0)
+      if (timeout->second.empty() || !std::all_of(
+          timeout->second.begin(), timeout->second.end(), [](char digit) {
+            return digit >= '0' && digit <= '9';
+          }))
       {
-        throw std::invalid_argument("expected a finite positive number");
+        throw std::invalid_argument("decimal digits only");
       }
-      const long double timeout_ns = std::ceil(
-        static_cast<long double>(read_error_timeout_ms_) * 1000000.0L);
-      if (timeout_ns > static_cast<long double>(std::numeric_limits<int64_t>::max())) {
-        throw std::out_of_range("timeout exceeds int64 nanoseconds");
+      const auto timeout_ms = std::stoll(timeout->second);
+      if (timeout_ms == 0 || timeout_ms > max_timeout_ms) {
+        throw std::out_of_range("timeout outside supported range");
       }
-      read_error_timeout_ns_ = static_cast<int64_t>(timeout_ns);
+      read_error_timeout_ns_ = timeout_ms * 1000000;
     } catch (const std::exception & error) {
       RCLCPP_FATAL(
         rclcpp::get_logger(kDynamixelHardware),
-        "Invalid read_error_timeout_ms '%s': expected a finite positive number (%s)",
-        timeout->second.c_str(), error.what());
+        "Invalid read_error_timeout_ms '%s': expected decimal integer milliseconds in "
+        "[1, %" PRId64 "] (%s)", timeout->second.c_str(), max_timeout_ms, error.what());
       return CallbackReturn::ERROR;
     }
   }
@@ -330,7 +331,8 @@ return_type DynamixelHardware::read(
       if (!communication_lost_) {
         RCLCPP_ERROR(
           rclcpp::get_logger(kDynamixelHardware),
-          "Communication lost: read_error_timeout_ms (%.3f ms) reached", read_error_timeout_ms_);
+          "Communication lost: read_error_timeout_ms (%" PRId64 " ms) reached",
+          read_error_timeout_ns_ / 1000000);
         communication_lost_ = true;
       }
       return return_type::ERROR;
