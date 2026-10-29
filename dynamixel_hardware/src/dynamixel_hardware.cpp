@@ -290,8 +290,10 @@ CallbackReturn DynamixelHardware::on_activate(const rclcpp_lifecycle::State & /*
   if (use_dummy_) {
     write(rclcpp::Time{}, rclcpp::Duration(0, 0));
   } else {
-    if (control_mode_ == ControlMode::Velocity) {
-      set_joint_velocities();
+    if (control_mode_ == ControlMode::Velocity &&
+      set_joint_velocities() != CallbackReturn::SUCCESS)
+    {
+      return CallbackReturn::ERROR;
     }
     if (set_joint_positions() != CallbackReturn::SUCCESS) {
       return CallbackReturn::ERROR;
@@ -604,6 +606,7 @@ CallbackReturn DynamixelHardware::set_joint_velocities()
       kGoalVelocityIndex, ids.data(), ids.size(), commands.data(), 1, &log))
   {
     RCLCPP_ERROR(rclcpp::get_logger(kDynamixelHardware), "%s", log);
+    return CallbackReturn::ERROR;
   }
   return CallbackReturn::SUCCESS;
 }
