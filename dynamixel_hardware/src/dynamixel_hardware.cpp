@@ -46,6 +46,8 @@ constexpr const char * const kExtraJointParameters[] = {
   "Position_D_Gain",
   "Velocity_P_Gain",
   "Velocity_I_Gain",
+  "Feedforward_1st_Gain",
+  "Feedforward_2nd_Gain",
 };
 
 CallbackReturn DynamixelHardware::on_init(
@@ -522,7 +524,18 @@ CallbackReturn DynamixelHardware::set_joint_params()
     for (auto paramName : kExtraJointParameters) {
       if (info_.joints[i].parameters.find(paramName) != info_.joints[i].parameters.end()) {
         auto value = std::stoi(info_.joints[i].parameters.at(paramName));
-        if (!dynamixel_workbench_.itemWrite(joint_ids_[i], paramName, value, &log)) {
+        bool ok;
+        if (paramName == "Feedforward_1st_Gain" || paramName == "Feedforward_2nd_Gain") {
+          // kilted's model DB has no items for the X-series feedforward gains;
+          // write the X-series 2A registers directly (88: 1st, 90: 2nd)
+          uint16_t addr = (paramName == "Feedforward_1st_Gain") ? 88 : 90;
+          uint8_t data[2] = {static_cast<uint8_t>(value & 0xFF),
+                             static_cast<uint8_t>((value >> 8) & 0xFF)};
+          ok = dynamixel_workbench_.writeRegister(joint_ids_[i], addr, 2, data, &log);
+        } else {
+          ok = dynamixel_workbench_.itemWrite(joint_ids_[i], paramName, value, &log);
+        }
+        if (!ok) {
           RCLCPP_FATAL(rclcpp::get_logger(kDynamixelHardware), "%s", log);
           return CallbackReturn::ERROR;
         }
