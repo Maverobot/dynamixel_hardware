@@ -87,6 +87,8 @@ public:
   return_type write(const rclcpp::Time & time, const rclcpp::Duration & period) override;
 
 private:
+  bool read_state(const char ** log);
+
   return_type enable_torque(const bool enabled);
 
   return_type set_control_mode(const ControlMode & mode, const bool force_set = false);
@@ -106,6 +108,10 @@ private:
   ControlMode control_mode_{ControlMode::Position};
   bool mode_changed_{false};
   bool use_dummy_{false};
+  double read_error_timeout_ms_{250.0};
+  rclcpp::Duration read_failure_elapsed_{0, 0};
+  bool read_failed_{false};
+  bool communication_lost_{false};
 };
 }  // namespace dynamixel_hardware
 

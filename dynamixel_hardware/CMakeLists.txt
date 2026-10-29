@@ -57,6 +57,11 @@ install(
 )
 
 if(BUILD_TESTING)
+  find_package(ament_cmake_gtest REQUIRED)
+  ament_add_gtest(test_dynamixel_hardware test/test_dynamixel_hardware.cpp)
+  target_include_directories(test_dynamixel_hardware PRIVATE include)
+  target_link_libraries(test_dynamixel_hardware ${PROJECT_NAME} util)
+  ament_target_dependencies(test_dynamixel_hardware hardware_interface rclcpp)
   find_package(ament_lint_auto REQUIRED)
   # the following line skips the linter which checks for copyrights
   # uncomment the line when a copyright and license is not present in all source files

@@ -16,7 +16,9 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <limits>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -103,6 +105,26 @@ CallbackReturn DynamixelHardware::on_init(
   if (!dynamixel_workbench_.init(usb_port.c_str(), baud_rate, &log)) {
     RCLCPP_FATAL(rclcpp::get_logger(kDynamixelHardware), "%s", log);
     return CallbackReturn::ERROR;
+  }
+
+  // Workbench 2.2.4 dereferences its port in the destructor even if init was never called.
+  const auto timeout = info_.hardware_parameters.find("read_error_timeout_ms");
+  if (timeout != info_.hardware_parameters.end()) {
+    try {
+      size_t parsed = 0;
+      read_error_timeout_ms_ = std::stod(timeout->second, &parsed);
+      if (parsed != timeout->second.size() || !std::isfinite(read_error_timeout_ms_) ||
+        read_error_timeout_ms_ <= 0.0)
+      {
+        throw std::invalid_argument("expected a finite positive number");
+      }
+    } catch (const std::exception & error) {
+      RCLCPP_FATAL(
+        rclcpp::get_logger(kDynamixelHardware),
+        "Invalid read_error_timeout_ms '%s': expected a finite positive number (%s)",
+        timeout->second.c_str(), error.what());
+      return CallbackReturn::ERROR;
+    }
   }
 
   for (uint i = 0; i < info_.joints.size(); ++i) {
@@ -239,7 +261,26 @@ CallbackReturn DynamixelHardware::on_activate(const rclcpp_lifecycle::State & /*
       joints_[i].state.effort = 0.0;
     }
   }
-  read(rclcpp::Time{}, rclcpp::Duration(0, 0));
+  if (!use_dummy_) {
+    bool valid = false;
+    for (int attempt = 0; attempt < 3; ++attempt) {
+      const char * log = nullptr;
+      if (read_state(&log)) {
+        valid = true;
+        break;
+      }
+      RCLCPP_WARN(
+        rclcpp::get_logger(kDynamixelHardware), "Activation read %d/3 failed: %s",
+        attempt + 1, log ? log : "unknown SDK error");
+    }
+    if (!valid) {
+      RCLCPP_ERROR(rclcpp::get_logger(kDynamixelHardware), "No valid state for activation");
+      return CallbackReturn::ERROR;
+    }
+    read_failure_elapsed_ = rclcpp::Duration(0, 0);
+    read_failed_ = false;
+    communication_lost_ = false;
+  }
   reset_command();
   write(rclcpp::Time{}, rclcpp::Duration(0, 0));
 
@@ -255,48 +296,79 @@ CallbackReturn DynamixelHardware::on_deactivate(
 
 return_type DynamixelHardware::read(
   const rclcpp::Time & /* time */,
-  const rclcpp::Duration & /* period */)
+  const rclcpp::Duration & period)
 {
   if (use_dummy_) {
     return return_type::OK;
   }
 
+  const char * log = nullptr;
+  if (!read_state(&log)) {
+    read_failed_ = true;
+    read_failure_elapsed_ = read_failure_elapsed_ + period;
+    const double elapsed_ms = read_failure_elapsed_.seconds() * 1000.0;
+    RCLCPP_WARN(
+      rclcpp::get_logger(kDynamixelHardware), "%s (read failures for %.3f ms)",
+      log ? log : "unknown SDK error", elapsed_ms);
+    if (elapsed_ms >= read_error_timeout_ms_) {
+      if (!communication_lost_) {
+        RCLCPP_ERROR(
+          rclcpp::get_logger(kDynamixelHardware),
+          "Communication lost: read_error_timeout_ms (%.3f ms) reached", read_error_timeout_ms_);
+        communication_lost_ = true;
+      }
+      return return_type::ERROR;
+    }
+    return return_type::OK;
+  }
+
+  if (read_failed_) {
+    RCLCPP_INFO(
+      rclcpp::get_logger(kDynamixelHardware), "Communication recovered after read failures");
+  }
+  read_failure_elapsed_ = rclcpp::Duration(0, 0);
+  read_failed_ = false;
+  communication_lost_ = false;
+  return return_type::OK;
+}
+
+bool DynamixelHardware::read_state(const char ** log)
+{
   std::vector<uint8_t> ids(info_.joints.size(), 0);
   std::vector<int32_t> positions(info_.joints.size(), 0);
   std::vector<int32_t> velocities(info_.joints.size(), 0);
   std::vector<int32_t> currents(info_.joints.size(), 0);
 
   std::copy(joint_ids_.begin(), joint_ids_.end(), ids.begin());
-  const char * log = nullptr;
 
   if (!dynamixel_workbench_.syncRead(
-      kPresentPositionVelocityCurrentIndex, ids.data(), ids.size(), &log))
+      kPresentPositionVelocityCurrentIndex, ids.data(), ids.size(), log))
   {
-    RCLCPP_ERROR(rclcpp::get_logger(kDynamixelHardware), "%s", log);
+    return false;
   }
 
   if (!dynamixel_workbench_.getSyncReadData(
       kPresentPositionVelocityCurrentIndex, ids.data(), ids.size(),
       control_items_[kPresentCurrentItem]->address,
-      control_items_[kPresentCurrentItem]->data_length, currents.data(), &log))
+      control_items_[kPresentCurrentItem]->data_length, currents.data(), log))
   {
-    RCLCPP_ERROR(rclcpp::get_logger(kDynamixelHardware), "%s", log);
+    return false;
   }
 
   if (!dynamixel_workbench_.getSyncReadData(
       kPresentPositionVelocityCurrentIndex, ids.data(), ids.size(),
       control_items_[kPresentVelocityItem]->address,
-      control_items_[kPresentVelocityItem]->data_length, velocities.data(), &log))
+      control_items_[kPresentVelocityItem]->data_length, velocities.data(), log))
   {
-    RCLCPP_ERROR(rclcpp::get_logger(kDynamixelHardware), "%s", log);
+    return false;
   }
 
   if (!dynamixel_workbench_.getSyncReadData(
       kPresentPositionVelocityCurrentIndex, ids.data(), ids.size(),
       control_items_[kPresentPositionItem]->address,
-      control_items_[kPresentPositionItem]->data_length, positions.data(), &log))
+      control_items_[kPresentPositionItem]->data_length, positions.data(), log))
   {
-    RCLCPP_ERROR(rclcpp::get_logger(kDynamixelHardware), "%s", log);
+    return false;
   }
 
   for (uint i = 0; i < ids.size(); i++) {
@@ -305,7 +377,7 @@ return_type DynamixelHardware::read(
     joints_[i].state.effort = dynamixel_workbench_.convertValue2Current(currents[i]);
   }
 
-  return return_type::OK;
+  return true;
 }
 
 return_type DynamixelHardware::write(
