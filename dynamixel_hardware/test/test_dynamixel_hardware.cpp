@@ -142,10 +142,16 @@ public:
 
   bool healthy() const {return healthy_;}
 
-private:
-  void reply(uint8_t id, const Bytes & data)
+  void reject_torque_enable()
   {
-    Bytes body{0x55, 0};
+    std::lock_guard<std::mutex> lock(mutex_);
+    reject_torque_enable_ = true;
+  }
+
+private:
+  void reply(uint8_t id, const Bytes & data, uint8_t error = 0)
+  {
+    Bytes body{0x55, error};
     body.insert(body.end(), data.begin(), data.end());
     Bytes stuffed;
     for (const auto byte : body) {
@@ -198,6 +204,10 @@ private:
         reply(id, read_register(id, word(body, 1), word(body, 3)));
         break;
       case 0x03:
+        if (reject_torque_enable_ && word(body, 1) == 64 && body.at(3) == 1) {
+          reply(id, {}, 0x04);  // Data range error, no write applied.
+          break;
+        }
         write_register(id, word(body, 1), Bytes(body.begin() + 3, body.end()));
         reply(id, {});
         break;
@@ -288,6 +298,7 @@ private:
   int drop_reads_{0};
   uint8_t drop_id_{0};
   int read_count_{0};
+  bool reject_torque_enable_{false};
 };
 
 class DynamixelHardwareTest : public ::testing::Test
@@ -423,6 +434,7 @@ TEST_F(DynamixelHardwareTest, ActivationWithoutValidReadWritesNoGoal)
   EXPECT_EQ(bus_.read_count(), 3);
   for (const auto & write : bus_.writes()) {
     EXPECT_NE(write.address, 116);
+    EXPECT_FALSE(write.address == 64 && write.data.at(0) == 1);
   }
   for (const auto value : state()) {
     EXPECT_TRUE(std::isnan(value));
@@ -443,6 +455,52 @@ TEST_F(DynamixelHardwareTest, ActivationRetriesTransientReadFailure)
   }
   bus_.drop_reads(1);
   EXPECT_EQ(read_ms(0), return_type::OK);
+}
+
+TEST_F(DynamixelHardwareTest, MeasuredGoalsPrecedeTorqueEnable)
+{
+  ASSERT_EQ(init(), CallbackReturn::SUCCESS);
+  for (const auto & write : bus_.writes()) {
+    EXPECT_FALSE(write.address == 64 && write.data.at(0) == 1);
+  }
+  ASSERT_EQ(activate(), CallbackReturn::SUCCESS);
+  int goals = 0;
+  int enables = 0;
+  for (const auto & write : bus_.writes()) {
+    if (write.address == 116) {
+      ++goals;
+      ASSERT_EQ(write.data.size(), 4u);
+      EXPECT_EQ(word(write.data, 0), write.id == 1 ? 2048 : 1024);
+      EXPECT_EQ(word(write.data, 2), 0);
+    }
+    if (write.address == 64 && write.data.at(0) == 1) {
+      ++enables;
+      EXPECT_EQ(goals, 2);
+    }
+  }
+  EXPECT_EQ(goals, 2);
+  EXPECT_EQ(enables, 2);
+}
+
+TEST_F(DynamixelHardwareTest, DisabledTorqueIsNeverEnabled)
+{
+  ASSERT_EQ(init("<param name='enable_torque'>false</param>"), CallbackReturn::SUCCESS);
+  ASSERT_EQ(activate(), CallbackReturn::SUCCESS);
+  ASSERT_TRUE(bus_.wait_for_goals(2));
+  for (const auto & write : bus_.writes()) {
+    EXPECT_FALSE(write.address == 64 && write.data.at(0) == 1);
+  }
+}
+
+TEST_F(DynamixelHardwareTest, TorqueEnableFailureAbortsActivationAfterSeeding)
+{
+  ASSERT_EQ(init(), CallbackReturn::SUCCESS);
+  bus_.reject_torque_enable();
+  EXPECT_EQ(activate(), CallbackReturn::ERROR);
+  ASSERT_TRUE(bus_.wait_for_goals(2));
+  for (const auto & write : bus_.writes()) {
+    EXPECT_FALSE(write.address == 64 && write.data.at(0) == 1);
+  }
 }
 
 TEST_F(DynamixelHardwareTest, StatusByteStuffingIsDecoded)

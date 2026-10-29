@@ -138,9 +138,6 @@ CallbackReturn DynamixelHardware::on_init(
   enable_torque(false);
   set_control_mode(ControlMode::Position, true);
   set_joint_params();
-  if (should_enable_torque_) {
-    enable_torque(true);
-  }
 
   const ControlItem * goal_position =
     dynamixel_workbench_.getItemInfo(joint_ids_[0], kGoalPositionItem);
@@ -282,7 +279,16 @@ CallbackReturn DynamixelHardware::on_activate(const rclcpp_lifecycle::State & /*
     communication_lost_ = false;
   }
   reset_command();
-  write(rclcpp::Time{}, rclcpp::Duration(0, 0));
+  if (use_dummy_) {
+    write(rclcpp::Time{}, rclcpp::Duration(0, 0));
+  } else {
+    if (set_joint_positions() != CallbackReturn::SUCCESS) {
+      return CallbackReturn::ERROR;
+    }
+    if (should_enable_torque_ && enable_torque(true) != return_type::OK) {
+      return CallbackReturn::ERROR;
+    }
+  }
 
   return CallbackReturn::SUCCESS;
 }
@@ -565,6 +571,7 @@ CallbackReturn DynamixelHardware::set_joint_positions()
       kGoalPositionIndex, ids.data(), ids.size(), commands.data(), 1, &log))
   {
     RCLCPP_ERROR(rclcpp::get_logger(kDynamixelHardware), "%s", log);
+    return CallbackReturn::ERROR;
   }
   return CallbackReturn::SUCCESS;
 }
