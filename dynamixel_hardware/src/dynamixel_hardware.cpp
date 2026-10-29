@@ -324,12 +324,43 @@ CallbackReturn DynamixelHardware::on_activate(const rclcpp_lifecycle::State & /*
     if (set_joint_positions() != CallbackReturn::SUCCESS) {
       return CallbackReturn::ERROR;
     }
+    for (size_t i = 0; i < joint_ids_.size(); ++i) {
+      const auto goal_position = dynamixel_workbench_.convertRadian2Value(
+        joint_ids_[i], static_cast<float>(joints_[i].command.position));
+      if (!verify_goal(joint_ids_[i], control_items_[kGoalPositionItem], goal_position)) {
+        return CallbackReturn::ERROR;
+      }
+      if (control_mode_ == ControlMode::Velocity &&
+        !verify_goal(joint_ids_[i], control_items_[kGoalVelocityItem], 0))
+      {
+        return CallbackReturn::ERROR;
+      }
+    }
     if (should_enable_torque_ && enable_torque(true) != return_type::OK) {
       return CallbackReturn::ERROR;
     }
   }
 
   return CallbackReturn::SUCCESS;
+}
+
+bool DynamixelHardware::verify_goal(uint8_t id, const ControlItem * item, int32_t expected)
+{
+  const char * log = nullptr;
+  int32_t actual = 0;
+  if (!dynamixel_workbench_.readRegister(id, item->item_name, &actual, &log)) {
+    RCLCPP_ERROR(
+      rclcpp::get_logger(kDynamixelHardware), "Servo %u %s readback failed: %s",
+      id, item->item_name, log ? log : "unknown SDK error");
+    return false;
+  }
+  if (actual != expected) {
+    RCLCPP_ERROR(
+      rclcpp::get_logger(kDynamixelHardware), "Servo %u %s readback mismatch: expected %d, got %d",
+      id, item->item_name, expected, actual);
+    return false;
+  }
+  return true;
 }
 
 CallbackReturn DynamixelHardware::on_deactivate(

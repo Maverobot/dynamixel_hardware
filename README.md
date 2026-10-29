@@ -41,8 +41,13 @@ consecutive failed cycles' control-loop periods accumulate toward this timeout;
 at the timeout the hardware returns an error. A valid read resets the timer.
 Activation requires a valid read within three attempts before writing any goal.
 Initialization does not enable torque. Activation writes the measured position
-as the goal before enabling torque (unless `enable_torque` is `false`). A failed
-read or goal transmission aborts activation without enabling torque. This does
+as the goal before enabling torque (unless `enable_torque` is `false`). Because
+Sync Write is broadcast without acknowledgments, activation reads each servo's
+Goal_Position back and requires it to match the commanded raw value before
+enabling torque. In velocity mode it first writes zero Goal_Velocity and also
+verifies that register reads back zero. This adds one register read per servo at
+activation (two in velocity mode). A failed read, goal transmission or readback
+mismatch aborts activation without enabling torque. This does
 not force previously enabled servos off at initialization.
 If the Operating Mode write is rejected (for example, EEPROM is locked by enabled
 torque), initialization continues only after every servo reports position mode

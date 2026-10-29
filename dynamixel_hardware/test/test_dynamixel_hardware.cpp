@@ -238,6 +238,19 @@ public:
     rejected_read_id_ = id;
   }
 
+  void ignore_sync_write(uint16_t address, uint8_t id)
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    ignored_sync_write_address_ = address;
+    ignored_sync_write_id_ = id;
+  }
+
+  int ignored_sync_write_count()
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return ignored_sync_write_count_;
+  }
+
   int rejected_write_count()
   {
     std::lock_guard<std::mutex> lock(mutex_);
@@ -334,6 +347,10 @@ private:
       case 0x83: {
           const auto length = word(body, 3);
           for (size_t i = 5; i < body.size(); i += length + 1) {
+            if (word(body, 1) == ignored_sync_write_address_ && body[i] == ignored_sync_write_id_) {
+              ++ignored_sync_write_count_;
+              continue;
+            }
             write_register(
             body[i], word(body, 1), Bytes(body.begin() + i + 1, body.begin() + i + 1 + length));
           }
@@ -410,6 +427,9 @@ private:
   int rejected_write_count_{0};
   uint16_t rejected_read_address_{0xffff};
   uint8_t rejected_read_id_{0};
+  uint16_t ignored_sync_write_address_{0xffff};
+  uint8_t ignored_sync_write_id_{0};
+  int ignored_sync_write_count_{0};
 };
 
 class DynamixelHardwareTest : public ::testing::Test
@@ -665,6 +685,57 @@ TEST_F(DynamixelHardwareTest, FailedActivationSeedDoesNotEnableTorque)
   }
 }
 
+TEST_F(DynamixelHardwareTest, IgnoredPositionSeedDoesNotEnableTorque)
+{
+  ASSERT_EQ(init(), CallbackReturn::SUCCESS);
+  bus_.ignore_sync_write(116, 2);
+  EXPECT_EQ(activate(), CallbackReturn::ERROR);
+  ASSERT_EQ(read_ms(0), return_type::OK);
+  EXPECT_EQ(bus_.ignored_sync_write_count(), 1);
+  for (const auto & write : bus_.writes()) {
+    EXPECT_FALSE(write.address == 64 && write.data.at(0) == 1);
+  }
+}
+
+TEST_F(DynamixelHardwareTest, FailedPositionReadbackDoesNotEnableTorque)
+{
+  ASSERT_EQ(init(), CallbackReturn::SUCCESS);
+  bus_.reject_register_read(116, 2);
+  EXPECT_EQ(activate(), CallbackReturn::ERROR);
+  ASSERT_EQ(read_ms(0), return_type::OK);
+  for (const auto & write : bus_.writes()) {
+    EXPECT_FALSE(write.address == 64 && write.data.at(0) == 1);
+  }
+}
+
+TEST_F(DynamixelHardwareTest, IgnoredVelocitySeedAbortsReactivation)
+{
+  ASSERT_EQ(init(), CallbackReturn::SUCCESS);
+  ASSERT_EQ(activate(), CallbackReturn::SUCCESS);
+  auto commands = hardware_.export_command_interfaces();
+  ASSERT_TRUE(commands.at(1).set_value(1.0));
+  ASSERT_EQ(hardware_.write(rclcpp::Time{}, rclcpp::Duration(0, 0)), return_type::OK);
+  ASSERT_TRUE(commands.at(1).set_value(1.0));
+  ASSERT_EQ(hardware_.write(rclcpp::Time{}, rclcpp::Duration(0, 0)), return_type::OK);
+  ASSERT_TRUE(bus_.wait_for_writes(104, 4));
+  const auto before = bus_.writes();
+  const auto velocity = std::find_if(
+    before.rbegin(), before.rend(), [](const ServoBus::Write & write) {
+      return write.id == 1 && write.address == 104;
+    });
+  ASSERT_NE(velocity, before.rend());
+  EXPECT_EQ(velocity->data, (Bytes{41, 0, 0, 0}));
+  ASSERT_EQ(hardware_.on_deactivate(rclcpp_lifecycle::State{}), CallbackReturn::SUCCESS);
+  bus_.ignore_sync_write(104, 1);
+  EXPECT_EQ(activate(), CallbackReturn::ERROR);
+  ASSERT_EQ(read_ms(0), return_type::OK);
+  EXPECT_EQ(bus_.ignored_sync_write_count(), 1);
+  const auto after = bus_.writes();
+  for (size_t i = before.size(); i < after.size(); ++i) {
+    EXPECT_FALSE(after[i].address == 64 && after[i].data.at(0) == 1);
+  }
+}
+
 TEST_F(DynamixelHardwareTest, NormalWriteStillIgnoresGoalTransmissionFailure)
 {
   ASSERT_EQ(init(), CallbackReturn::SUCCESS);
@@ -839,6 +910,22 @@ TEST_F(DynamixelHardwareTest, MeasuredGoalsPrecedeTorqueEnable)
   }
   EXPECT_EQ(goals, 2);
   EXPECT_EQ(enables, 2);
+  std::array<bool, 2> read_back{};
+  for (const auto & packet : transport_.packets()) {
+    if (packet.size() < 12 || packet[2] != 0xfd) {
+      continue;
+    }
+    if (packet[7] == 0x02 && word(packet, 8) == 116) {
+      EXPECT_EQ(word(packet, 10), 4);
+      read_back.at(packet[4] - 1) = true;
+    }
+    if (packet[7] == 0x03 && word(packet, 8) == 64 && packet[10] == 1) {
+      EXPECT_TRUE(read_back[0]);
+      EXPECT_TRUE(read_back[1]);
+    }
+  }
+  EXPECT_TRUE(read_back[0]);
+  EXPECT_TRUE(read_back[1]);
 }
 
 TEST_F(DynamixelHardwareTest, DisabledTorqueIsNeverEnabled)

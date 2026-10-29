@@ -89,6 +89,7 @@ public:
 
 private:
   bool read_state(const char ** log);
+  bool verify_goal(uint8_t id, const ControlItem * item, int32_t expected);
 
   return_type enable_torque(const bool enabled);
 
