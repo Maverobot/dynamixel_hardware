@@ -309,7 +309,8 @@ protected:
 
   void TearDown() override {EXPECT_TRUE(bus_.healthy());}
 
-  CallbackReturn init(const std::string & parameters = "")
+  CallbackReturn init(
+    const std::string & parameters = "", const std::string & joint_parameters = "")
   {
     std::string urdf =
       "<robot name='test'><link name='base'/><link name='link1'/><link name='link2'/>"
@@ -321,7 +322,7 @@ protected:
       "<param name='baud_rate'>1000000</param>" + parameters + "</hardware>";
     for (int id = 1; id <= 2; ++id) {
       urdf += "<joint name='joint" + std::to_string(id) + "'><param name='id'>" +
-        std::to_string(id) + "</param><command_interface name='position'/>"
+        std::to_string(id) + "</param>" + joint_parameters + "<command_interface name='position'/>"
         "<command_interface name='velocity'/><state_interface name='position'/>"
         "<state_interface name='velocity'/><state_interface name='effort'/></joint>";
     }
@@ -352,6 +353,34 @@ protected:
   ServoBus bus_;
   dynamixel_hardware::DynamixelHardware hardware_;
 };
+
+TEST_F(DynamixelHardwareTest, FeedforwardGainsUseEManualRegisters)
+{
+  ASSERT_EQ(
+    init(
+      "", "<param name='Feedforward_1st_Gain'>4660</param>"
+      "<param name='Feedforward_2nd_Gain'>9029</param>"),
+    CallbackReturn::SUCCESS);
+  for (uint8_t id = 1; id <= 2; ++id) {
+    int first_gain_writes = 0;
+    int second_gain_writes = 0;
+    for (const auto & write : bus_.writes()) {
+      if (write.id != id) {
+        continue;
+      }
+      if (write.address == 90) {
+        ++first_gain_writes;
+        EXPECT_EQ(write.data, (Bytes{0x34, 0x12}));
+      }
+      if (write.address == 88) {
+        ++second_gain_writes;
+        EXPECT_EQ(write.data, (Bytes{0x45, 0x23}));
+      }
+    }
+    EXPECT_EQ(first_gain_writes, 1);
+    EXPECT_EQ(second_gain_writes, 1);
+  }
+}
 
 TEST_F(DynamixelHardwareTest, ValidReadPublishesConvertedState)
 {

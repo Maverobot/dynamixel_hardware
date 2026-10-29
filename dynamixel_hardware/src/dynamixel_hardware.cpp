@@ -17,6 +17,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstring>
 #include <limits>
 #include <stdexcept>
 #include <string>
@@ -604,12 +605,13 @@ CallbackReturn DynamixelHardware::set_joint_params()
       if (info_.joints[i].parameters.find(paramName) != info_.joints[i].parameters.end()) {
         auto value = std::stoi(info_.joints[i].parameters.at(paramName));
         bool ok;
-        if (paramName == "Feedforward_1st_Gain" || paramName == "Feedforward_2nd_Gain") {
+        const bool is_feedforward_first = std::strcmp(paramName, "Feedforward_1st_Gain") == 0;
+        if (is_feedforward_first || std::strcmp(paramName, "Feedforward_2nd_Gain") == 0) {
           // kilted's model DB has no items for the X-series feedforward gains;
-          // write the X-series 2A registers directly (88: 1st, 90: 2nd)
-          uint16_t addr = (paramName == "Feedforward_1st_Gain") ? 88 : 90;
+          // write the X-series 2A registers directly (90: 1st, 88: 2nd)
+          uint16_t addr = is_feedforward_first ? 90 : 88;
           uint8_t data[2] = {static_cast<uint8_t>(value & 0xFF),
-                             static_cast<uint8_t>((value >> 8) & 0xFF)};
+            static_cast<uint8_t>((value >> 8) & 0xFF)};
           ok = dynamixel_workbench_.writeRegister(joint_ids_[i], addr, 2, data, &log);
         } else {
           ok = dynamixel_workbench_.itemWrite(joint_ids_[i], paramName, value, &log);
