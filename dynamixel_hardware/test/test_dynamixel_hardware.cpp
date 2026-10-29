@@ -124,12 +124,12 @@ public:
     return writes_;
   }
 
-  bool wait_for_goals(size_t count)
+  bool wait_for_writes(uint16_t address, size_t count)
   {
     std::unique_lock<std::mutex> lock(mutex_);
-    return changed_.wait_for(lock, std::chrono::seconds(1), [this, count]() {
-               return std::count_if(writes_.begin(), writes_.end(), [](const Write & write) {
-                        return write.address == 116;
+    return changed_.wait_for(lock, std::chrono::seconds(1), [this, address, count]() {
+               return std::count_if(writes_.begin(), writes_.end(), [address](const Write & write) {
+                        return write.address == address;
       }) >= static_cast<int>(count);
     });
   }
@@ -476,7 +476,7 @@ TEST_F(DynamixelHardwareTest, ActivationRetriesTransientReadFailure)
   bus_.drop_reads(1);
   EXPECT_EQ(activate(), CallbackReturn::SUCCESS);
   EXPECT_EQ(bus_.read_count(), 2);
-  ASSERT_TRUE(bus_.wait_for_goals(2));
+  ASSERT_TRUE(bus_.wait_for_writes(116, 2));
   for (const auto & write : bus_.writes()) {
     if (write.address == 116) {
       EXPECT_EQ(word(write.data, 0), write.id == 1 ? 2048 : 1024);
@@ -484,6 +484,45 @@ TEST_F(DynamixelHardwareTest, ActivationRetriesTransientReadFailure)
   }
   bus_.drop_reads(1);
   EXPECT_EQ(read_ms(0), return_type::OK);
+}
+
+TEST_F(DynamixelHardwareTest, ReactivationInVelocityModeTransmitsZeroVelocity)
+{
+  ASSERT_EQ(init(), CallbackReturn::SUCCESS);
+  ASSERT_EQ(activate(), CallbackReturn::SUCCESS);
+  auto commands = hardware_.export_command_interfaces();
+  // The mode switch resets commands when restoring torque. Then command motion.
+  ASSERT_TRUE(commands.at(1).set_value(1.0));
+  ASSERT_EQ(hardware_.write(rclcpp::Time{}, rclcpp::Duration(0, 0)), return_type::OK);
+  ASSERT_TRUE(commands.at(1).set_value(1.0));
+  ASSERT_EQ(hardware_.write(rclcpp::Time{}, rclcpp::Duration(0, 0)), return_type::OK);
+  ASSERT_TRUE(bus_.wait_for_writes(104, 4));
+  const auto before = bus_.writes();
+  auto velocity = std::find_if(before.rbegin(), before.rend(), [](const ServoBus::Write & write) {
+        return write.id == 1 && write.address == 104;
+  });
+  ASSERT_NE(velocity, before.rend());
+  EXPECT_EQ(velocity->data, (Bytes{41, 0, 0, 0}));
+
+  ASSERT_EQ(hardware_.on_deactivate(rclcpp_lifecycle::State{}), CallbackReturn::SUCCESS);
+  ASSERT_EQ(activate(), CallbackReturn::SUCCESS);
+  ASSERT_TRUE(bus_.wait_for_writes(104, 6));
+  const auto after = bus_.writes();
+  int zero_velocities = 0;
+  int measured_goals = 0;
+  for (size_t i = before.size(); i < after.size(); ++i) {
+    if (after[i].address == 104) {
+      ++zero_velocities;
+      EXPECT_EQ(after[i].data, (Bytes{0, 0, 0, 0}));
+    }
+    if (after[i].address == 116) {
+      ++measured_goals;
+      EXPECT_EQ(word(after[i].data, 0), after[i].id == 1 ? 2048 : 1024);
+    }
+    EXPECT_NE(after[i].address, 11);  // Reactivation must not switch control modes.
+  }
+  EXPECT_EQ(zero_velocities, 2);
+  EXPECT_EQ(measured_goals, 2);
 }
 
 TEST_F(DynamixelHardwareTest, MeasuredGoalsPrecedeTorqueEnable)
@@ -515,7 +554,7 @@ TEST_F(DynamixelHardwareTest, DisabledTorqueIsNeverEnabled)
 {
   ASSERT_EQ(init("<param name='enable_torque'>false</param>"), CallbackReturn::SUCCESS);
   ASSERT_EQ(activate(), CallbackReturn::SUCCESS);
-  ASSERT_TRUE(bus_.wait_for_goals(2));
+  ASSERT_TRUE(bus_.wait_for_writes(116, 2));
   for (const auto & write : bus_.writes()) {
     EXPECT_FALSE(write.address == 64 && write.data.at(0) == 1);
   }
@@ -526,7 +565,7 @@ TEST_F(DynamixelHardwareTest, TorqueEnableFailureAbortsActivationAfterSeeding)
   ASSERT_EQ(init(), CallbackReturn::SUCCESS);
   bus_.reject_torque_enable();
   EXPECT_EQ(activate(), CallbackReturn::ERROR);
-  ASSERT_TRUE(bus_.wait_for_goals(2));
+  ASSERT_TRUE(bus_.wait_for_writes(116, 2));
   for (const auto & write : bus_.writes()) {
     EXPECT_FALSE(write.address == 64 && write.data.at(0) == 1);
   }

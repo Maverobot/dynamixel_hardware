@@ -286,6 +286,9 @@ CallbackReturn DynamixelHardware::on_activate(const rclcpp_lifecycle::State & /*
     if (set_joint_positions() != CallbackReturn::SUCCESS) {
       return CallbackReturn::ERROR;
     }
+    if (control_mode_ == ControlMode::Velocity) {
+      set_joint_velocities();
+    }
     if (should_enable_torque_ && enable_torque(true) != return_type::OK) {
       return CallbackReturn::ERROR;
     }
