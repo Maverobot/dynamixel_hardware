@@ -44,6 +44,12 @@ Initialization does not enable torque. Activation writes the measured position
 as the goal before enabling torque (unless `enable_torque` is `false`). A failed
 read or goal transmission aborts activation without enabling torque. This does
 not force previously enabled servos off at initialization.
+If the Operating Mode write is rejected (for example, EEPROM is locked by enabled
+torque), initialization continues only after every servo reports position mode
+(3). A failed readback, another mode, or a rejected joint-parameter write fails
+initialization. Initialization itself never forces torque off. If initialization
+fails, dynamixel_workbench's existing teardown disables torque on discovered
+servos, so support the arm before starting or restarting the driver.
 Dummy mode is unchanged.
 
 ```xml

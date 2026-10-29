@@ -218,6 +218,32 @@ public:
     reject_torque_enable_ = true;
   }
 
+  void reject_register_write(uint16_t address)
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    rejected_write_address_ = address;
+  }
+
+  void set_operating_mode(uint8_t id, uint8_t mode, bool torque_enabled)
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    tables_.at(id - 1)[11] = mode;
+    tables_.at(id - 1)[64] = torque_enabled ? 1 : 0;
+  }
+
+  void reject_register_read(uint16_t address, uint8_t id)
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    rejected_read_address_ = address;
+    rejected_read_id_ = id;
+  }
+
+  int rejected_write_count()
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return rejected_write_count_;
+  }
+
 private:
   void reply(uint8_t id, const Bytes & data, uint8_t error = 0)
   {
@@ -271,9 +297,20 @@ private:
         reply(id, {0x24, 0x04, 1});
         break;
       case 0x02:
+        if (word(body, 1) == rejected_read_address_ && id == rejected_read_id_) {
+          reply(id, {}, 0x07);
+          break;
+        }
         reply(id, read_register(id, word(body, 1), word(body, 3)));
         break;
       case 0x03:
+        if (word(body, 1) == rejected_write_address_ ||
+          (word(body, 1) == 11 && tables_.at(id - 1)[64] != 0))
+        {
+          ++rejected_write_count_;
+          reply(id, {}, 0x07);  // Access error, no write applied.
+          break;
+        }
         if (reject_torque_enable_ && word(body, 1) == 64 && body.at(3) == 1) {
           reply(id, {}, 0x04);  // Data range error, no write applied.
           break;
@@ -369,6 +406,10 @@ private:
   uint8_t drop_id_{0};
   int read_count_{0};
   bool reject_torque_enable_{false};
+  uint16_t rejected_write_address_{0xffff};
+  int rejected_write_count_{0};
+  uint16_t rejected_read_address_{0xffff};
+  uint8_t rejected_read_id_{0};
 };
 
 class DynamixelHardwareTest : public ::testing::Test
@@ -429,6 +470,52 @@ protected:
   ServoWriteInterceptor transport_{bus_.path()};
   dynamixel_hardware::DynamixelHardware hardware_;
 };
+
+TEST_F(DynamixelHardwareTest, RejectedOperatingModeContinuesWhenAllServosAlreadyUsePosition)
+{
+  bus_.set_operating_mode(1, 3, true);
+  bus_.set_operating_mode(2, 3, true);
+  ASSERT_EQ(init(), CallbackReturn::SUCCESS);
+  EXPECT_EQ(bus_.rejected_write_count(), 1);
+  EXPECT_TRUE(bus_.writes().empty());
+  ASSERT_EQ(activate(), CallbackReturn::SUCCESS);
+  for (const auto & write : bus_.writes()) {
+    EXPECT_FALSE(write.address == 64 && write.data.at(0) == 0);
+  }
+}
+
+TEST_F(DynamixelHardwareTest, RejectedOperatingModeAbortsInitWhenAnyServoUsesAnotherMode)
+{
+  bus_.set_operating_mode(1, 3, true);
+  bus_.set_operating_mode(2, 1, true);
+  EXPECT_EQ(init("", "<param name='Position_P_Gain'>1280</param>"), CallbackReturn::ERROR);
+  EXPECT_EQ(bus_.rejected_write_count(), 1);
+  EXPECT_TRUE(bus_.writes().empty());
+}
+
+TEST_F(DynamixelHardwareTest, RejectedOperatingModeAbortsInitWhenReadbackFails)
+{
+  bus_.set_operating_mode(1, 3, true);
+  bus_.set_operating_mode(2, 3, true);
+  bus_.reject_register_read(11, 2);
+  EXPECT_EQ(init(), CallbackReturn::ERROR);
+  EXPECT_EQ(bus_.rejected_write_count(), 1);
+  EXPECT_TRUE(bus_.writes().empty());
+}
+
+TEST_F(DynamixelHardwareTest, RejectedPositionGainAbortsInit)
+{
+  bus_.reject_register_write(84);
+  EXPECT_EQ(init("", "<param name='Position_P_Gain'>1280</param>"), CallbackReturn::ERROR);
+  EXPECT_EQ(bus_.rejected_write_count(), 1);
+  const auto writes = bus_.writes();
+  ASSERT_EQ(writes.size(), 2u);
+  for (const auto & write : writes) {
+    EXPECT_EQ(write.address, 11);  // Only the two preceding Operating_Mode writes.
+    EXPECT_NE(write.address, 64);
+    EXPECT_NE(write.address, 116);
+  }
+}
 
 TEST_F(DynamixelHardwareTest, FeedforwardGainsUseEManualRegisters)
 {
