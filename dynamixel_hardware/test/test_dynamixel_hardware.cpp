@@ -437,6 +437,22 @@ TEST_F(DynamixelHardwareTest, DefaultTimeoutAndInitialNanState)
   }
 }
 
+TEST_F(DynamixelHardwareTest, TimeoutAtExactly1001Milliseconds)
+{
+  ASSERT_EQ(init("<param name='read_error_timeout_ms'>1001</param>"), CallbackReturn::SUCCESS);
+  bus_.drop_reads(1);
+  EXPECT_EQ(read_ms(1001), return_type::ERROR);
+}
+
+TEST_F(DynamixelHardwareTest, FractionalNanosecondTimeoutRoundsUp)
+{
+  ASSERT_EQ(init("<param name='read_error_timeout_ms'>0.0000015</param>"), CallbackReturn::SUCCESS);
+  bus_.drop_reads(2);
+  const auto period = rclcpp::Duration::from_nanoseconds(1);
+  EXPECT_EQ(hardware_.read(rclcpp::Time{}, period), return_type::OK);
+  EXPECT_EQ(hardware_.read(rclcpp::Time{}, period), return_type::ERROR);
+}
+
 class InvalidReadTimeoutTest : public DynamixelHardwareTest,
   public ::testing::WithParamInterface<const char *>
 {
@@ -453,7 +469,7 @@ TEST_P(InvalidReadTimeoutTest, InvalidTimeoutRejectedBeforeServoPackets)
 
 INSTANTIATE_TEST_SUITE_P(
   InvalidValues, InvalidReadTimeoutTest,
-  ::testing::Values("0", "-1", "nan", "inf", "no", "250ms", "", "1e999"));
+  ::testing::Values("0", "-1", "nan", "inf", "no", "250ms", "", "1e999", "1e20"));
 
 TEST_F(DynamixelHardwareTest, ActivationWithoutValidReadWritesNoGoal)
 {

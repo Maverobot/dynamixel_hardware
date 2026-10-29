@@ -119,6 +119,12 @@ CallbackReturn DynamixelHardware::on_init(
       {
         throw std::invalid_argument("expected a finite positive number");
       }
+      const long double timeout_ns = std::ceil(
+        static_cast<long double>(read_error_timeout_ms_) * 1000000.0L);
+      if (timeout_ns > static_cast<long double>(std::numeric_limits<int64_t>::max())) {
+        throw std::out_of_range("timeout exceeds int64 nanoseconds");
+      }
+      read_error_timeout_ns_ = static_cast<int64_t>(timeout_ns);
     } catch (const std::exception & error) {
       RCLCPP_FATAL(
         rclcpp::get_logger(kDynamixelHardware),
@@ -320,7 +326,7 @@ return_type DynamixelHardware::read(
     RCLCPP_WARN(
       rclcpp::get_logger(kDynamixelHardware), "%s (read failures for %.3f ms)",
       log ? log : "unknown SDK error", elapsed_ms);
-    if (elapsed_ms >= read_error_timeout_ms_) {
+    if (read_failure_elapsed_.nanoseconds() >= read_error_timeout_ns_) {
       if (!communication_lost_) {
         RCLCPP_ERROR(
           rclcpp::get_logger(kDynamixelHardware),
