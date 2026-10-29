@@ -14,11 +14,14 @@
 
 #include <poll.h>
 #include <pty.h>
+#include <sys/stat.h>
+#include <sys/syscall.h>
 #include <unistd.h>
 
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <cerrno>
 #include <chrono>
 #include <cmath>
 #include <condition_variable>
@@ -41,6 +44,72 @@ using hardware_interface::CallbackReturn;
 using hardware_interface::return_type;
 using Bytes = std::vector<uint8_t>;
 
+class ServoWriteInterceptor;
+thread_local ServoWriteInterceptor * servo_write_interceptor = nullptr;
+
+// Only this test executable interposes write(). Observe the SDK's synchronous
+// calls on the fixture thread to this pty slave, including Protocol 1 probes.
+// Replies, unrelated fds and other threads always use the real write syscall.
+class ServoWriteInterceptor
+{
+public:
+  explicit ServoWriteInterceptor(const std::string & path)
+  {
+    if (stat(path.c_str(), &slave_) != 0 || !S_ISCHR(slave_.st_mode) ||
+      path.find("/dev/pts/") != 0 || servo_write_interceptor != nullptr)
+    {
+      throw std::runtime_error("expected an exclusive test pty interceptor");
+    }
+    servo_write_interceptor = this;
+  }
+
+  ~ServoWriteInterceptor() {servo_write_interceptor = nullptr;}
+
+  void fail_next_goal_position() {fail_goal_position_ = true;}
+  size_t failed_goal_writes() const {return failed_goal_writes_;}
+  const std::vector<Bytes> & packets() const {return packets_;}
+
+  bool reject_write(int fd, const void * data, size_t size)
+  {
+    struct stat target{};
+    if (fstat(fd, &target) != 0 || target.st_dev != slave_.st_dev ||
+      target.st_ino != slave_.st_ino || target.st_rdev != slave_.st_rdev)
+    {
+      return false;
+    }
+    const auto * bytes = static_cast<const uint8_t *>(data);
+    packets_.emplace_back(bytes, bytes + size);
+    // Protocol 2 broadcast Sync Write, Goal_Position (116), four bytes per id.
+    if (fail_goal_position_ && size >= 14 && bytes[0] == 0xff && bytes[1] == 0xff &&
+      bytes[2] == 0xfd && bytes[3] == 0 && bytes[4] == 0xfe && bytes[7] == 0x83 &&
+      bytes[8] == 116 && bytes[9] == 0 && bytes[10] == 4 && bytes[11] == 0)
+    {
+      fail_goal_position_ = false;
+      ++failed_goal_writes_;
+      return true;
+    }
+    return false;
+  }
+
+private:
+  struct stat slave_{};
+  bool fail_goal_position_{false};
+  size_t failed_goal_writes_{0};
+  std::vector<Bytes> packets_;
+};
+}  // namespace
+
+extern "C" ssize_t write(int fd, const void * data, size_t size)
+{
+  if (servo_write_interceptor && servo_write_interceptor->reject_write(fd, data, size)) {
+    errno = EIO;
+    return -1;
+  }
+  return syscall(SYS_write, fd, data, size);
+}
+
+namespace
+{
 uint16_t word(const Bytes & bytes, size_t offset)
 {
   return bytes.at(offset) | (bytes.at(offset + 1) << 8);
@@ -351,6 +420,7 @@ protected:
   CallbackReturn activate() {return hardware_.on_activate(rclcpp_lifecycle::State{});}
 
   ServoBus bus_;
+  ServoWriteInterceptor transport_{bus_.path()};
   dynamixel_hardware::DynamixelHardware hardware_;
 };
 
@@ -465,6 +535,7 @@ TEST_P(InvalidReadTimeoutTest, InvalidTimeoutRejectedBeforeServoPackets)
     CallbackReturn::ERROR);
   EXPECT_TRUE(bus_.writes().empty());
   EXPECT_EQ(bus_.read_count(), 0);
+  EXPECT_TRUE(transport_.packets().empty());
 }
 
 INSTANTIATE_TEST_SUITE_P(
@@ -484,6 +555,34 @@ TEST_F(DynamixelHardwareTest, ActivationWithoutValidReadWritesNoGoal)
   for (const auto value : state()) {
     EXPECT_TRUE(std::isnan(value));
   }
+}
+
+TEST_F(DynamixelHardwareTest, FailedActivationSeedDoesNotEnableTorque)
+{
+  ASSERT_EQ(init(), CallbackReturn::SUCCESS);
+  transport_.fail_next_goal_position();
+  EXPECT_EQ(activate(), CallbackReturn::ERROR);
+  EXPECT_EQ(transport_.failed_goal_writes(), 1u);
+  ASSERT_EQ(read_ms(0), return_type::OK);  // Drain any preceding writes on the bus.
+  for (const auto & write : bus_.writes()) {
+    EXPECT_NE(write.address, 116);
+    EXPECT_FALSE(write.address == 64 && write.data.at(0) == 1);
+  }
+}
+
+TEST_F(DynamixelHardwareTest, NormalWriteStillIgnoresGoalTransmissionFailure)
+{
+  ASSERT_EQ(init(), CallbackReturn::SUCCESS);
+  ASSERT_EQ(activate(), CallbackReturn::SUCCESS);
+  ASSERT_TRUE(bus_.wait_for_writes(116, 2));
+  transport_.fail_next_goal_position();
+  EXPECT_EQ(hardware_.write(rclcpp::Time{}, rclcpp::Duration(0, 0)), return_type::OK);
+  EXPECT_EQ(transport_.failed_goal_writes(), 1u);
+  int goals = 0;
+  for (const auto & write : bus_.writes()) {
+    goals += write.address == 116;
+  }
+  EXPECT_EQ(goals, 2);
 }
 
 TEST_F(DynamixelHardwareTest, ActivationRetriesTransientReadFailure)
